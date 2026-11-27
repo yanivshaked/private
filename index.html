@@ -1,0 +1,142 @@
+<!doctype html>
+<!-- Unlock page for the published (encrypted) site. scripts/publish.mjs copies this to dist/index.html.
+     It reveals nothing about the content: the whole app is in site.enc, encrypted with AES-256-GCM
+     under a key derived from the password (PBKDF2-SHA256). Decryption happens only in the browser. -->
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>Private</title>
+<style>
+:root{--bg:#faf6f0;--panel:#fffdf9;--ink:#2b2420;--muted:#7a6e66;--line:#e9e0d5;--accent:#b5532f;--accent-ink:#fff;--err:#a3432b}
+@media (prefers-color-scheme:dark){:root{--bg:#1c1816;--panel:#25201d;--ink:#f1e9e1;--muted:#a99c92;--line:#3a332e;--accent:#e07a52;--accent-ink:#1c1816;--err:#f08c70}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;padding:16px;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,"Segoe UI",sans-serif}
+form{width:100%;max-width:360px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px;display:flex;flex-direction:column;gap:12px}
+h1{font-size:20px;margin:0}
+p{margin:0;color:var(--muted);font-size:14px}
+input[type=password]{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);font:inherit}
+label{display:flex;gap:8px;align-items:center;font-size:14px;color:var(--muted)}
+button{padding:10px;border:0;border-radius:10px;background:var(--accent);color:var(--accent-ink);font:inherit;font-weight:600;cursor:pointer}
+button:disabled{opacity:.6;cursor:wait}
+.err{color:var(--err);font-size:14px;min-height:1.5em}
+</style>
+</head>
+<body>
+<form id="f" hidden>
+  <h1 data-t="title"></h1>
+  <p data-t="intro"></p>
+  <input type="password" id="pw" autocomplete="current-password" required autofocus>
+  <label><input type="checkbox" id="remember"> <span data-t="remember"></span></label>
+  <button id="go" data-t="unlock"></button>
+  <div class="err" id="err" role="alert"></div>
+</form>
+<noscript>JavaScript is required.</noscript>
+<script>
+(() => {
+  "use strict";
+  // Tiny built-in strings: this page can't use the app's i18n files, which are inside the encrypted bundle.
+  const STR = {
+    en: { title: "Private site", intro: "Enter the password to continue.", password: "Password", remember: "Remember on this device", unlock: "Unlock", busy: "Unlocking…", wrong: "Wrong password.", fail: "Couldn't load the site. Check your connection and try again.", old: "This browser is too old to open the site." },
+    he: { title: "אתר פרטי", intro: "יש להזין סיסמה כדי להמשיך.", password: "סיסמה", remember: "לזכור במכשיר הזה", unlock: "כניסה", busy: "פותח…", wrong: "הסיסמה שגויה.", fail: "לא ניתן לטעון את האתר. כדאי לבדוק את החיבור ולנסות שוב.", old: "הדפדפן הזה ישן מדי לפתיחת האתר." },
+    ar: { title: "موقع خاص", intro: "أدخل كلمة المرور للمتابعة.", password: "كلمة المرور", remember: "التذكّر على هذا الجهاز", unlock: "فتح", busy: "جارٍ الفتح…", wrong: "كلمة المرور غير صحيحة.", fail: "تعذّر تحميل الموقع. تحقّق من الاتصال وحاول مرة أخرى.", old: "هذا المتصفح قديم جدًا لفتح الموقع." },
+    zh: { title: "私密网站", intro: "请输入密码以继续。", password: "密码", remember: "在此设备上记住", unlock: "解锁", busy: "正在解锁…", wrong: "密码错误。", fail: "无法加载网站，请检查网络后重试。", old: "此浏览器版本过旧，无法打开本网站。" },
+    fr: { title: "Site privé", intro: "Saisissez le mot de passe pour continuer.", password: "Mot de passe", remember: "Se souvenir sur cet appareil", unlock: "Déverrouiller", busy: "Déverrouillage…", wrong: "Mot de passe incorrect.", fail: "Impossible de charger le site. Vérifiez votre connexion et réessayez.", old: "Ce navigateur est trop ancien pour ouvrir le site." },
+    de: { title: "Privater Bereich", intro: "Gib das Passwort ein, um fortzufahren.", password: "Passwort", remember: "Auf diesem Gerät merken", unlock: "Entsperren", busy: "Wird entsperrt…", wrong: "Falsches Passwort.", fail: "Die Seite konnte nicht geladen werden. Prüfe deine Verbindung und versuche es erneut.", old: "Dieser Browser ist zu alt, um die Seite zu öffnen." },
+  };
+  const RTL = new Set(["he", "ar"]);
+  const saved = (() => { try { return JSON.parse(localStorage.getItem("rrf:lang")); } catch { return null; } })();
+  const lang = [new URLSearchParams(location.search).get("lang"), saved, ...(navigator.languages || [navigator.language])]
+    .map(l => String(l || "").toLowerCase().split("-")[0]).find(l => l in STR) || "en";
+  const s = STR[lang];
+  document.documentElement.lang = lang;
+  document.documentElement.dir = RTL.has(lang) ? "rtl" : "ltr";
+  document.title = s.title;
+  document.querySelectorAll("[data-t]").forEach(el => { el.textContent = s[el.dataset.t]; });
+  const $ = id => document.getElementById(id);
+  $("pw").placeholder = s.password;
+  $("pw").setAttribute("aria-label", s.password);
+
+  const KEY_STORE = "rrf:siteKey";
+  const store = {
+    get() { try { return localStorage.getItem(KEY_STORE); } catch { return null; } },
+    set(v) { try { localStorage.setItem(KEY_STORE, v); } catch {} },
+    clear() { try { localStorage.removeItem(KEY_STORE); } catch {} },
+  };
+  const b64 = { enc: u => btoa(String.fromCharCode(...new Uint8Array(u))), dec: t => Uint8Array.from(atob(t), c => c.charCodeAt(0)) };
+
+  // site.enc = "RRF1" | iterations (uint32 BE) | salt (16) | iv (12) | AES-GCM(gzip(html))
+  let blob = null;
+  async function payload() {
+    if (blob) return blob;
+    const res = await fetch("site.enc", { cache: "no-cache" });
+    if (!res.ok) throw new Error("fetch " + res.status);
+    const buf = new Uint8Array(await res.arrayBuffer());
+    if (String.fromCharCode(...buf.slice(0, 4)) !== "RRF1") throw new Error("bad format");
+    const view = new DataView(buf.buffer);
+    blob = { iterations: view.getUint32(4), salt: buf.slice(8, 24), iv: buf.slice(24, 36), data: buf.slice(36) };
+    return blob;
+  }
+
+  async function deriveKey(password, p) {
+    const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveKey"]);
+    return crypto.subtle.deriveKey({ name: "PBKDF2", hash: "SHA-256", salt: p.salt, iterations: p.iterations },
+      base, { name: "AES-GCM", length: 256 }, true, ["decrypt"]);
+  }
+
+  // AES-GCM is authenticated: a wrong key throws OperationError instead of returning garbage.
+  async function decrypt(key, p) {
+    const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: p.iv }, key, p.data);
+    return new Response(new Blob([plain]).stream().pipeThrough(new DecompressionStream("gzip"))).text();
+  }
+
+  function show(html) {
+    document.open();
+    document.write(html);
+    document.close();
+  }
+
+  async function tryRemembered() {
+    const raw = store.get();
+    if (!raw) return false;
+    try {
+      const p = await payload();
+      const key = await crypto.subtle.importKey("raw", b64.dec(raw), "AES-GCM", false, ["decrypt"]);
+      show(await decrypt(key, p));
+      return true;
+    } catch (e) {
+      if (e && e.name === "OperationError") store.clear(); // password changed since
+      return false;
+    }
+  }
+
+  async function start() {
+    if (!(window.crypto && crypto.subtle && window.DecompressionStream)) {
+      $("f").hidden = false; $("err").textContent = s.old; $("go").disabled = true; return;
+    }
+    if (await tryRemembered()) return;
+    $("f").hidden = false;
+    $("pw").focus();
+    $("f").onsubmit = async e => {
+      e.preventDefault();
+      $("go").disabled = true; $("go").textContent = s.busy; $("err").textContent = "";
+      const fail = msg => { $("err").textContent = msg; $("go").disabled = false; $("go").textContent = s.unlock; };
+      let p, key, html;
+      try {
+        p = await payload();
+        key = await deriveKey($("pw").value, p);
+      } catch { return fail(s.fail); }
+      try {
+        html = await decrypt(key, p);
+      } catch { $("pw").select(); return fail(s.wrong); }
+      if ($("remember").checked) store.set(b64.enc(await crypto.subtle.exportKey("raw", key)));
+      show(html);
+    };
+  }
+  start();
+})();
+</script>
+</body>
+</html>
